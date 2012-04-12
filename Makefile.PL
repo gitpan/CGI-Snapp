@@ -31,7 +31,7 @@ WriteMakefile
 	 Class::ISA      => 0.36,
 	 Hash::FieldHash => 0.10,
 	 IO::Pipe        => 1.13,
-	 Log::Handler    => 0.71,
+	 Log::Handler    => 0.75,
 	 parent          => 0.225,
 	 Proc::Fork      => 0.71,
 	 strict          => 1.03,

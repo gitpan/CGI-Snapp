@@ -39,13 +39,14 @@ my(%test)   =
 (
 	'basic.pl'      =>  4,
 	'callbacks.pl'  => 13,
-	'defaults.pl'   =>  7,
+	'defaults.pl'   =>  6,
 	'headers.pl'    => 16,
 	'hook.tests.pl' => 16,
-	'isa.pl'        =>  2,
+	'isa.pl'        =>  1,
 	'overrides.pl'  =>  2,
 	'params.pl'     => 12,
 	'pod.pl'        =>  1,
+	'psgi.basic.pl' =>  4,
 	'run.modes.pl'  => 11,
 	'subclass.pl'   =>  3,
 );

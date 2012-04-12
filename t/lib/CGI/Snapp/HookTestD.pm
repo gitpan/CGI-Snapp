@@ -14,6 +14,8 @@ use CGI::Snapp::Plugin::HookTest::HookTest3;
 use CGI::Snapp::Plugin::HookTest1;
 use CGI::Snapp::Plugin::HookTest2;
 
+our $VERSION = '1.01';
+
 # --------------------------------------------------
 
 sub setup

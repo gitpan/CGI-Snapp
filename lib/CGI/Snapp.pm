@@ -18,12 +18,11 @@ fieldhash my %_error_mode       => '_error_mode';
 fieldhash my %_headers          => '_headers';
 fieldhash my %_header_type      => '_header_type';
 fieldhash my %logger            => 'logger';
-fieldhash my %maxlevel          => 'maxlevel';
-fieldhash my %minlevel          => 'minlevel';
 fieldhash my %_object_callbacks => '_object_callbacks';
 fieldhash my %PARAMS            => 'PARAMS';
 fieldhash my %_params           => '_params';
 fieldhash my %_prerun_mode_lock => '_prerun_mode_lock';
+fieldhash my %_psgi             => '_psgi';
 fieldhash my %QUERY             => 'QUERY';
 fieldhash my %_query            => '_query';
 fieldhash my %_run_mode_source  => '_run_mode_source';
@@ -42,7 +41,7 @@ my(%class_callbacks) =
 
 my($myself);
 
-our $VERSION = '1.00';
+our $VERSION = '1.01';
 
 # --------------------------------------------------
 
@@ -290,18 +289,66 @@ sub delete_header
 
 # --------------------------------------------------
 
-sub _determine_header
+sub _determine_cgi_header
 {
 	my($self) = @_;
 
-	$self -> log(debug => '_determine_header()');
+	$self -> log(debug => '_determine_cgi_header()');
 
 	my($q)    = $self -> query;
 	my($type) = $self -> header_type;
 
-	return $type eq 'header' ? $q -> header($self -> header_props) : $type eq 'redirect' ? $q -> redirect($self -> header_props) : '';
+	return
+		$type eq 'header'
+		? $q -> header($self -> header_props)
+		: $type eq 'redirect'
+		? $q -> redirect($self -> header_props)
+		: '';
 
-} # End of _determine_header.
+} # End of _determine_cgi_header.
+
+# --------------------------------------------------
+
+sub _determine_output
+{
+	my($self) = @_;
+
+	$self -> log(debug => '_determine_output()');
+
+	my($run_mode) = $self -> _determine_run_mode;
+
+	$self -> _prerun_mode_lock(0);
+	$self -> call_hook('prerun', $run_mode);
+	$self -> _prerun_mode_lock(1);
+
+	my($output) = $self -> _generate_output;
+	$output     = $$output if (ref $output eq 'SCALAR');
+
+	$self -> call_hook('postrun', \$output);
+
+	return $output;
+
+} # End of _determine_output.
+
+# --------------------------------------------------
+
+sub _determine_psgi_header
+{
+	my($self) = @_;
+
+	$self -> log(debug => '_determine_psgi_header()');
+
+	my($q)    = $self -> query;
+	my($type) = $self -> header_type;
+
+	return
+		$type eq 'header'
+		? $q -> psgi_header($self -> header_props)
+		: $type eq 'redirect'
+		? $q -> psgi_redirect($self -> header_props)
+		: (200, []);
+
+} # End of _determine_psgi_header.
 
 # --------------------------------------------------
 
@@ -574,13 +621,12 @@ sub _init
 	$$arg{_error_mode}       = '';
 	$$arg{_headers}          = {};
 	$$arg{_header_type}      = 'header';
-	$$arg{logger}            ||= defined($$arg{logger}) ? $$arg{logger} : undef; # Caller can set.
-	$$arg{maxlevel}          ||= 'notice'; # Caller can set.
-	$$arg{minlevel}          ||= 'error';  # Caller can set.
+	$$arg{logger}            ||= ''; # Caller can set.
 	$$arg{_object_callbacks} = {};
 	$$arg{PARAMS}            ||= ''; # Caller can set.
 	$$arg{_params}           = {};
 	$$arg{_prerun_mode_lock} = 1;
+	$$arg{_psgi}             ||= 0;  # Caller can set.
 	$$arg{QUERY}             ||= ''; # Caller can set.
 	$$arg{_query}            = '';
 	$$arg{_run_mode_source}  = 'rm'; # I.e. the CGI form field of that name.
@@ -589,21 +635,6 @@ sub _init
 	$$arg{_start_mode}       = 'start';
 	$self                    = from_hash($self, $arg);
 	$myself                  = $self;
-
-	if (! defined $self -> logger)
-	{
-		$self -> logger(Log::Handler -> new);
-		$self -> logger -> add
-		(
-		 screen =>
-		 {
-			 maxlevel       => $self -> maxlevel,
-			 message_layout => '%m',
-			 minlevel       => $self -> minlevel,
-			 newline        => 1,
-		 }
-		);
-	}
 
 	$self -> _params($$arg{PARAMS}) if ($$arg{PARAMS} && (ref $$arg{PARAMS} eq 'HASH') );
 	$self -> _query($$arg{QUERY})   if ($$arg{QUERY});
@@ -786,6 +817,35 @@ sub prerun_mode
 
 # --------------------------------------------------
 
+sub psgi_app
+{
+	my($self, %arg) = @_;
+
+	$self -> log(debug => 'psgi_app(...)');
+
+	return
+		sub
+		{
+			my($env) = @_;
+
+			if (! $arg{QUERY})
+			{
+				require CGI::PSGI;
+
+				$arg{QUERY} = CGI::PSGI -> new($env);
+			}
+
+			$arg{_psgi} = 1; # Required.
+			my($class)  = $self;
+			$class      =~ s/=HASH\(.+\)//;
+
+			return $class -> new(%arg) -> run;
+		};
+
+} # End of psgi_app.
+
+# --------------------------------------------------
+
 sub query
 {
 	my($self, $q) = @_;
@@ -807,28 +867,32 @@ sub run
 
 	$self -> log(debug => 'run()');
 
-	my($run_mode) = $self -> _determine_run_mode;
+	my($output) = $self -> _determine_output;
 
-	$self -> _prerun_mode_lock(0);
-	$self -> call_hook('prerun', $run_mode);
-	$self -> _prerun_mode_lock(1);
+	if ($self -> _psgi)
+	{
+		my($status, $header) = $self -> _determine_psgi_header;
 
-	my($result) = $self -> _generate_output;
-	$result     = $$result if (ref $result eq 'SCALAR');
+		utf8::downgrade($_, 0) for @$header;
 
-	$self -> call_hook('postrun', \$result);
+		$self -> call_hook('teardown');
 
-	my($header) = $self -> _determine_header;
+		return [$status, $header, [$output] ];
+	}
+	else
+	{
+		my($header) = $self -> _determine_cgi_header;
 
-	utf8::downgrade($header, 0);
+		utf8::downgrade($header, 0);
 
-	$result = $header . $result;
+		$output = $header . $output;
 
-	print $result if ($self -> send_output);
+		print $output if ($self -> send_output);
 
-	$self -> call_hook('teardown');
+		$self -> call_hook('teardown');
 
-	return $result;
+		return $output;
+	}
 
 } # End of run.
 
@@ -1207,34 +1271,14 @@ Key-value pairs accepted in the parameter list (see corresponding methods for de
 
 Specify a logger compatible with L<Log::Handler>.
 
-Default: A logger of type L<Log::Handler> which writes to the screen, but is (of course) silent unless the 'maxlevel' parameter (below) is set appropriately.
+Default: '' (The empty string).
 
-To stop creation of a logger, just set 'logger' to the empty string (not undef).
+To clarify: The built-in calls to log() all use a log level of 'debug', so if your logger has 'maxlevel' set
+to anything less than 'debug', nothing nothing will get logged.
 
-To clarify: The built-in calls to log() all use a log level of 'debug', and, with the default value of 'maxlevel' set to
-'notice', nothing actually gets logged by default.
+'maxlevel' and 'minlevel' are discussed in L<Log::Handler#LOG-LEVELS> and L<Log::Handler::Levels>.
 
-Also, to use your own log object, see L</How do I use my own logger object?>.
-
-=item o maxlevel => $logOption1
-
-This option affects L<Log::Handler> objects.
-
-See L<Log::Handler#LOG-LEVELS> and L<Log::Handler::Levels>.
-
-Default: 'notice'.
-
-In the test files t/*.pl, you'll often see new() called as new(maxlevel => 'debug', send_output => 0), which actives debugging and stops output being sent to the HTTP client.
-
-=item o minlevel => $logOption2
-
-This option affects L<Log::Handler> objects.
-
-See L<Log::Handler#LOG-LEVELS> and L<Log::Handler::Levels>.
-
-Default: 'error'.
-
-No lower levels are used.
+Also, see L</How do I use my own logger object?> and L</Troubleshooting>.
 
 =item o PARAMS => $hashref
 
@@ -1590,39 +1634,17 @@ Returns nothing.
 
 So, the body of this method consists of this 1 line:
 
-	$self -> logger -> $level($string) if ($self -> logger);
-
-The default logger object is of type L<Log::Handler>, and, by default, nothing is logged (due to maxlevel being 'notice' and the code using $level eq 'debug').
+	$self -> logger -> $level($string) if ($self && $self -> logger);
 
 =head2 logger([$logger_object])
 
-Sets and gets the logger object.
+Sets and gets the logger object (of type L<Log::Handler>.
 
 Here, the [] indicate an optional parameter.
-
-To stop creation of a logger, just set 'logger' to the empty string (not undef), in the call to L</new()>.
 
 'logger' is a parameter to L</new()>. See L</Constructor and Initialization> for details.
 
-=head2 maxlevel([$string])
-
-Sets and gets the maximum log level as used by the logger object, which defaults to an object of type L<Log::Handler>.
-
-Here, the [] indicate an optional parameter.
-
-'maxlevel' is a parameter to L</new()>. See L</Constructor and Initialization> for details.
-
-See L<Log::Handler#LOG-LEVELS> and L<Log::Handler::Levels>.
-
-=head2 minlevel([$string])
-
-Sets and gets the minimum log level as used by the logger object, which defaults to an object of type L<Log::Handler>.
-
-Here, the [] indicate an optional parameter.
-
-'minlevel' is a parameter to L</new()>. See L</Constructor and Initialization> for details.
-
-See L<Log::Handler#LOG-LEVELS> and L<Log::Handler::Levels>.
+Also, see L</How do I use my own logger object?>.
 
 =head2 mode_param([@new_options])
 
@@ -1658,7 +1680,7 @@ Here, 2 * N means there must be an even number of parameters, or the code calls 
 
 The array is expected to be of the form: (path_info => $integer[, param => $string]).
 
-Use (path_info => $integer) to set the run mode from the value of $ENV{PATH_INFO}, which in turn is set by the web server from the path info sent be the HTTP client.
+Use (path_info => $integer) to set the run mode from the value of $ENV{PATH_INFO}, which in turn is set by the web server from the path info sent by the HTTP client.
 (path_info => 0) means $ENV{PATH_INFO} is ignored. The $integer is explained in full just below.
 
 If the optional (param => $string) part is supplied, then $string will be name of the CGI form field to use if there is no $ENV{PATH_INFO}.
@@ -1784,6 +1806,27 @@ prerun_mode($string) can only be called from with your L</cgiapp_prerun()> metho
 Despite that restriction, L</cgiapp_prerun()> can use any information whatsoever to determine a run mode.
 
 For example, it could get parameters from the query object, and use those, perhaps together with config data, to get yet more data from a database.
+
+=head2 psgi_app($args_to_new)
+
+Returns a L<PSGI|http://plackperl.org/>-compatible coderef which, when called, runs your sub-class of L<CGI::Snapp>
+as a L<PSGI|http://plackperl.org/> app.
+
+$args_to_new is a hashref of arguments that are passed into the constructor (L</new()>) of your application.
+
+You can supply you own query object, with psgi_app({QUERY => Some::Object -> new}). But really there's no point.
+Just let the code create the default query object, which will be of type L<CGI::PSGI>.
+
+L<CGI::Application> also provides sub run_as_psgi(), but we have no need of that.
+
+Note: This method, psgi_app(), is very similar to L<CGI::Snapp::Dispatch/as_psgi(@args)>, but the latter contains
+this line (amongst other logic):
+
+	$app -> mode_param(sub {return $rm}) if ($rm);
+
+where the current method does not. This means L<CGI::Snapp::Dispatch> can determine the run mode from the path info
+sent from the web client, whereas if you use psgi_app(), your sub-class of L<CGI::Snapp> must contain all the logic
+required to determine the run mode.
 
 =head2 query([$q])
 
@@ -1935,9 +1978,15 @@ L<the Data::Session Troubleshooting guidelines|https://metacpan.org/module/Data:
 
 =head1 FAQ
 
+=head2 Does CGI::Snapp V 1.01 support PSGI?
+
+Yes. See L</psgi_app()> and L<CGI::Snapp::Dispatch>.
+
 =head2 Is there any sample code?
 
 Yes. See t/*.pl and all the modules in t/lib/*.
+
+See also L<CGI::Snapp::Dispatch> and its t/psi.args.t.
 
 =head2 Why did you fork CGI::Application?
 
@@ -1952,21 +2001,7 @@ As a byproduct of forking, rewriting the documentation has also allowed me to cu
 
 =head2 What version is the fork of CGI::Application based on?
 
-=over 4
-
-=item o CGI::Snapp V 1.00 is based on CGI::Application V 4.31
-
-Put simply, this is before the PSGI stuff was grafted in, and my use of L</CGI::Application::Dispatch> stopped working.
-
-=item o Next to be done is L<CGI::Application::Dispatch> V 2.18
-
-=item o Then will come L<CGI::Application::Dispatch::PSGI> V 0.2
-
-=back
-
-Then things will get interesting.
-
-So L<CGI::Snapp> V 1.00 will, in some cases, run with a pre-existing install of the latter 2 modules.
+CGI::Snapp V 1.00 is based on CGI::Application V 4.31. CGI::Snapp V 1.01 is based on CGI::Application V 4.50.
 
 =head2 How does CGI::Snapp differ from CGI::Application?
 
@@ -2006,6 +2041,8 @@ Here is a list of the global variables in L<CGI::Application>, and the correspon
 
 =item o __INSTALLED_CALLBACKS => L</installed_callbacks()>
 
+=item o __IS_PSGI => _psgi()
+
 =item o __MODE_PARAM => L</mode_param([@new_options])>
 
 =item o __PARAMS => L</param([@params])>
@@ -2013,8 +2050,6 @@ Here is a list of the global variables in L<CGI::Application>, and the correspon
 =item o __PRERUN_MODE => L</prerun_mode($string)>
 
 =item o __PRERUN_MODE_LOCKED => _prerun_mode_lock([$Boolean])
-
-The leading '_' means all such methods are for the exclusive use of the author of this module.
 
 =item o __QUERY_OBJ => L</query([$q])>
 
@@ -2025,6 +2060,8 @@ The leading '_' means all such methods are for the exclusive use of the author o
 =item o __TMPL_PATH => Not implemented
 
 =back
+
+The leading '_' on some CGI::Snapp method names means all such methods are for the exclusive use of the author of this module.
 
 =head3 New methods
 
@@ -2037,10 +2074,6 @@ The leading '_' means all such methods are for the exclusive use of the author o
 =item o L</log($level, $string)>
 
 =item o L</logger($logger_object)>
-
-=item o L</maxlevel($string)>
-
-=item o L</minlevel($string)>
 
 =item o L</send_output([$Boolean])>
 
@@ -2063,6 +2096,8 @@ See L</How does add_header() differ from header_add()?>.
 =item o html_tmpl_class()
 
 =item o load_tmpl()
+
+=item o run_as_psgi()
 
 =item o tmpl_path()
 
@@ -2268,6 +2303,99 @@ See t/subclass.pl for how it works in practice.
 Study the sample code in L<CGI::Snapp::Demo::Four>, which shows how to supply a L<Config::Plugin::Tiny> *.ini file to configure the logger via the wrapper class
 L<CGI::Snapp::Demo::Four::Wrapper>.
 
+Also, see any test script, e.g. t/basic.pl.
+
+=head2 What else do I need to know about logging?
+
+The effect of logging varies depending on the stage at which it is activated.
+
+And, your logger must be compatible with L<Log::Handler>.
+
+If you call your sub-class of CGI::Snapp as My::App -> new(logger => $logging), then logging is turned on at the
+earliest possible time. This means calls within L</new()>, to L</call_hook($hook, @args)> (which calls cgiapp_init() )
+and L</setup()>, are logged. And since you have probably overridden setup(), you can do this in your setup():
+
+	$self -> log($level => $message); # Log anything...
+
+Alternately, you could override L</cgiapp_init()> or L</cgiapp_prerun()>, and create your own logger object
+within one of those.
+
+Then you just do $self -> logger($my_logger), after which logging is immediately activated. But obviously that
+means the calls to call_hook() and setup() (in new() ) will not produce any log output, because by now they have
+already been run.
+
+Nevertheless, after this point (e.g. in cgiapp_init() ), since a logger is now set up, logging will produce output.
+
+Remember the prefix 'Local::Wines::Controller' mentioned in L<CGI::Snapp::Dispatch/PSGI Scripts>?
+
+Here's what it's cgiapp_prerun() looks like:
+
+	sub cgiapp_prerun
+	{
+		my($self) = @_;
+
+		# Can't call, since logger not yet set up.
+		# Well, could, but it's pointless...
+
+		#$self -> log(debug => 'cgiapp_prerun()');
+
+		$self -> param(config => Local::Config -> new(module_name => 'Local::Wines') -> get_config);
+		$self -> set_connector; # The dreaded DBIx::Connector.
+		$self -> logger(Local::Logger -> new(config => $self -> param('config') ) );
+
+		# Log the CGI form parameters.
+
+		my($q) = $self -> query;
+
+		$self -> log(info  => '');
+		$self -> log(info  => $q -> url(-full => 1, -path => 1) );
+		$self -> log(info  => "Param: $_: " . $q -> param($_) ) for $q -> param;
+
+		# Other controllers add their own run modes.
+
+		$self -> run_modes([qw/display/]);
+		$self -> log(debug => 'tmpl_path: ' . ${$self -> param('config')}{template_path});
+
+		# Set up the database, the templater and the viewer.
+		# We pass the templater into the viewer so all views share it.
+
+		# A newer design has the controller created in the db class.
+
+		$self -> param
+			(
+			 db => Local::Wines::Database -> new
+			 (
+			  dbh    => $self -> param('connector') -> dbh,
+			  logger => $self -> logger,
+			  query  => $q,
+			 )
+			);
+
+		$self -> param
+			(
+			 templater => Text::Xslate -> new
+			 (
+			  input_layer => '',
+			  path        => ${$self -> param('config')}{template_path},
+			 )
+			);
+
+		$self -> param
+			(
+			 view => Local::Wines::View -> new
+			 (
+			  db        => $self -> param('db'),
+			  logger    => $self -> logger,
+			  templater => $self -> param('templater'),
+			 )
+			);
+
+		# Output this here so we know how far we got.
+
+		$self -> log(info  => 'Session id: ' . $self -> param('db') -> session -> id);
+
+	} # End of cgiapp_prerun.
+
 =head2 So, should I upgrade from CGI::Application to CGI::Snapp?
 
 Well, that's up to you. Of course, if your code is not broken, don't fix it. But, as I said above, L<CGI::Snapp> will be going in to production in my work.
@@ -2290,6 +2418,32 @@ shell> perl httpd/cgi-bin/cgi.snapp.one.cgi
 
 If that doesn't work, you're in b-i-g trouble. Keep reading for suggestions as to what to do next.
 
+=item o Did you try using a logger to trace the method calls?
+
+Pass a logger to your sub-class of L<CGI::Snapp> like this:
+
+	my($logger) = Log::Handler -> new;
+
+	$logger -> add
+		(
+		 screen =>
+		 {
+			 maxlevel       => 'debug',
+			 message_layout => '%m',
+			 minlevel       => 'error',
+			 newline        => 1, # When running from the command line.
+		 }
+		);
+	CGI::Snapp -> new(logger => $logger, ...) -> run;
+
+Then, in your methods, just use:
+
+	$self -> log(debug => 'A string');
+
+The entry to each method in CGI::Snapp and L<CGI::Snapp::Dispatch> is logged using this technique,
+although only when maxlevel is 'debug'. Lower levels for maxlevel do not trigger logging.
+See the source for details.
+
 =item o The system Perl 'v' perlbrew
 
 Are you using perlbrew? If so, recall that your web server will use the first line of your L<CGI> script to find a Perl,
@@ -2310,6 +2464,8 @@ L<CGI::Application>
 The following are all part of this set of distros:
 
 L<CGI::Snapp> - A almost back-compat fork of CGI::Application
+
+L<CGI::Snapp::Dispatch> and L<CGI::Snapp::Dispatch::Regexp> - Dispatch requests to CGI::Snapp-based objects
 
 L<CGI::Snapp::Plugin::Forward> - A plugin for CGI::Snapp to switch cleanly to another run mode within the same app
 
