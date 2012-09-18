@@ -6,9 +6,9 @@ build_requires:
   Test::More: 0.94
   Test::Pod: 1.44
 configure_requires:
-  Module::Build: 0.38
+  Module::Build: 0
 dynamic_config: 1
-generated_by: 'Module::Build version 0.4, CPAN::Meta::Converter version 2.120630'
+generated_by: 'Module::Build version 0.4003, CPAN::Meta::Converter version 2.120630'
 license: artistic
 meta-spec:
   url: http://module-build.sourceforge.net/META-spec-v1.4.html
@@ -17,9 +17,10 @@ name: CGI-Snapp
 provides:
   CGI::Snapp:
     file: lib/CGI/Snapp.pm
-    version: 1.01
+    version: 1.02
 requires:
   CGI: 3.59
+  CGI::PSGI: 0.15
   CGI::Simple: 1.113
   Capture::Tiny: 0.16
   Carp: 1.2
@@ -35,4 +36,4 @@ requires:
   warnings: 1.03
 resources:
   license: http://opensource.org/licenses/artistic-license.php
-version: 1.01
+version: 1.02
