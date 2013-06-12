@@ -42,7 +42,7 @@ my(%class_callbacks) =
 
 my($myself);
 
-our $VERSION = '1.03';
+our $VERSION = '1.04';
 
 # --------------------------------------------------
 
@@ -666,14 +666,14 @@ sub _init
 sub log
 {
 	my($self, $level, $s) = @_;
-
-	croak "Error: No level defined in call to log()\n" if (! defined $level);
+	$level ||= 'info';
+	$s     ||= '';
 
 	# We can't use $self here because add_callback can be called as a class method,
 	# and logging inside add_callback would then call here without initializing $self
 	# to be an instance. It would just be the string name of the class calling add_callback.
 
-	$myself -> logger -> $level($s) if ($myself && $myself -> logger);
+	$myself -> logger -> log($level => $s) if ($myself && $myself -> logger);
 
 } # End of log.
 
@@ -1016,7 +1016,7 @@ sub teardown
 
 =head1 NAME
 
-CGI::Snapp - A almost back-compat fork of CGI::Application
+CGI::Snapp - An almost back-compat fork of CGI::Application
 
 =head1 Synopsis
 
@@ -1322,7 +1322,7 @@ Specify a logger compatible with L<Log::Handler>.
 Default: '' (The empty string).
 
 To clarify: The built-in calls to log() all use a log level of 'debug', so if your logger has 'maxlevel' set
-to anything less than 'debug', nothing nothing will get logged.
+to anything less than 'debug', nothing will get logged.
 
 'maxlevel' and 'minlevel' are discussed in L<Log::Handler#LOG-LEVELS> and L<Log::Handler::Levels>.
 
@@ -1689,6 +1689,8 @@ The default. Uses the hash returned by L</header_props([@headers])> to generate 
 
 Don't output any headers. See also the L</send_output([$Boolean)]> method.
 
+In this case the HTTP status is set to 200.
+
 =item o 'redirect'
 
 Generates a redirection header to send to the HTTP client.
@@ -1697,13 +1699,17 @@ Generates a redirection header to send to the HTTP client.
 
 =head2 log($level, $string)
 
-If a logger object exists, then this calls the $level method of that object, passing it $string to log.
+If a logger object exists, then this calls the log() method of that object, passing it $level and $string.
 
 Returns nothing.
 
 So, the body of this method consists of this 1 line:
 
-	$self -> logger -> $level($string) if ($self && $self -> logger);
+	$self -> logger -> log($level => $string) if ($self && $self -> logger);
+
+Up until V 1.03, this used to call $self -> logger -> $level($s), but the change was made to allow
+simpler loggers, meaning they did not have to implement all the methods covered by $level().
+See CHANGES for details. For more on log levels, see L<Log::Handler::Levels>.
 
 =head2 logger([$logger_object])
 
@@ -2071,6 +2077,21 @@ In particular, you are I<strongly> encouraged to read L<the Data::Session FAQ|ht
 L<the Data::Session Troubleshooting guidelines|https://metacpan.org/module/Data::Session#Troubleshooting> before writing your own teardown() method.
 
 =head1 FAQ
+
+=head2 Do I need to output a header when using Ajax?
+
+Yes. At least, when I use jQuery I must do this in a run mode:
+
+	$self -> add_header(Status => 200, 'Content-Type' => 'text/html; charset=utf-8');
+
+	return $self -> param('view') -> search -> display($name, $row);
+
+Here, display() returns a HTML table wrapped in 2 divs in the jQuery style, which becomes the return value
+of the run mode.
+
+The quoted code is in L<App::Office::Contacts::Controller::Exporter::Search>'s display (the run mode), and the
+display() method being called above is in L<App::Office::Contacts::View::Search>, but it will be the same no
+matter which Perl app you're running.
 
 =head2 Does CGI::Snapp V 1.01 support PSGI?
 
